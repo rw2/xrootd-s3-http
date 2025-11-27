@@ -1,6 +1,6 @@
 /***************************************************************
  *
- * Copyright (C) 2024, Pelican Project, Morgridge Institute for Research
+ * Copyright (C) 2025, Pelican Project, Morgridge Institute for Research
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you
  * may not use this file except in compliance with the License.  You may
@@ -18,21 +18,28 @@
 
 #pragma once
 
-#include "HTTPDirectory.hh"
-#include "S3Commands.hh"
-#include "S3FileSystem.hh"
+#include "GlobusFileSystem.hh"
+
+#include <XrdOss/XrdOss.hh>
 
 #include <string>
 #include <vector>
 
 class XrdSysError;
 
-class S3Directory : public XrdOssDF {
+// Structure to hold Globus object information
+struct GlobusObjectInfo {
+	size_t m_size;
+	std::string m_key;
+	std::string m_last_modified;
+};
+
+class GlobusDirectory : public XrdOssDF {
   public:
-	S3Directory(XrdSysError &log, const S3FileSystem &fs)
+	GlobusDirectory(XrdSysError &log, const GlobusFileSystem &fs)
 		: m_log(log), m_fs(fs) {}
 
-	virtual ~S3Directory() {}
+	virtual ~GlobusDirectory() {}
 
 	virtual int Opendir(const char *path, XrdOucEnv &env) override;
 
@@ -44,17 +51,15 @@ class S3Directory : public XrdOssDF {
 
   private:
 	void Reset();
-	int ListS3Dir(const std::string &ct);
+	int ListGlobusDir();
 
-	XrdSysError &m_log;
 	bool m_opened{false};
 	ssize_t m_idx{0};
-	std::vector<S3ObjectInfo> m_objInfo;
-	std::vector<std::string> m_commonPrefixes;
+	std::vector<GlobusObjectInfo> m_objInfo;
+	std::vector<GlobusObjectInfo> m_directories;
 	std::string m_prefix;
-	std::string m_ct;
 	std::string m_object;
-	const S3FileSystem &m_fs;
-	S3AccessInfo m_ai;
+	XrdSysError &m_log;
+	const GlobusFileSystem &m_fs;
 	struct stat *m_stat_buf{nullptr};
 };

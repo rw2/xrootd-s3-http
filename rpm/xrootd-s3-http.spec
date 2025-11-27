@@ -1,5 +1,5 @@
 Name:		xrootd-s3-http
-Version:        0.2.1
+Version:        0.5.3
 Release:        1%{?dist}
 Summary:        S3/HTTP filesystem plugins for xrootd
 
@@ -41,10 +41,48 @@ cmake --build redhat-linux-build --verbose
 %files
 %{_libdir}/libXrdHTTPServer-5.so
 %{_libdir}/libXrdS3-5.so
+%{_libdir}/libXrdOssHttp-5.so
+%{_libdir}/libXrdOssGlobus-5.so
+%{_libdir}/libXrdOssS3-5.so
+%{_libdir}/libXrdOssFilter-5.so
+%{_libdir}/libXrdOssPosc-5.so
 %doc README.md
 %license LICENSE
 
 %changelog
+* Fri Oct 24 2025 Brian Bockelman <bbockelman@morgridge.org> - 0.5.3-1
+- Fix directory listings for the POSC filtering plugin.
+
+* Thu Oct 2 2025 Justin Hiemstra <jhiemstra@wisc.edu> - 0.5.2-1
+- Fix download buffers that could try reading past the end of the file
+
+* Wed Aug 27 2025 Brian Bockelman <bbockelman@morgridge.org> - 0.5.1-1
+- Minor build fixes for a wider set of platforms.
+- Ensure unit tests can succeed even when running without network connectivity
+- Bump user agent version (forgotten in 0.5.0).
+
+* Wed Jul 30 2025 William Jiang <whjiang@wisc.edu> - 0.5.0-1
+- Add support for Globus endpoints (reads, writes, listings)
+- Add support for HTTP writes
+- Add new "Persist on Successful Close" (POSC) plugin to prevent files being
+  uploaded from being visible in the namespace.
+- The HTTP OSS plugin can do file listings based on generated directories.
+
+* Fri May 30 2025 Brian Bockelman <bbockelman@morgridge.org> - 0.4.1-1
+- Fix stall timeouts which would never fire.
+- Fix bug where S3 rate limiting would result in corrupt data being sent back to the client.
+- Remove redundant HEAD which was invoked twice on S3 file open.
+- Put libcurl into threadsafe mode, avoiding potential deadlocks or long unresponsive periods.
+
+* Thu May 29 2025 Brian Bockelman <bbockelman@morgridge.org> - 0.4.0-1
+- Improve logging messages to include timing of read requests
+- Implement the vector read method, used by some clients.
+- Send basic cache performance statistics out via the XRootD OSS g-stream.
+
+* Sat Mar 15 2025 Brian Bockelman <bbockelman@morgridge.org> - 0.3.0-1
+- Add new filter plugin to the package
+- Add renamed plugins to the package
+
 * Sat Feb 1 2025 Brian Bockelman <bbockelman@morgridge.org> - 0.2.1-1
 - Bump to upstream version 0.2.1.
 

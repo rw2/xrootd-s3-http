@@ -562,12 +562,13 @@ bool AmazonS3SendMultipartPart::GetEtag(std::string &result) {
 AmazonS3Download::~AmazonS3Download() {}
 
 bool AmazonS3Download::SendRequest(off_t offset, size_t size) {
+	m_request_start = std::chrono::steady_clock::now();
 	if (offset != 0 || size != 0) {
 		std::string range;
 		formatstr(range, "bytes=%lld-%lld", static_cast<long long int>(offset),
 				  static_cast<long long int>(offset + size - 1));
 		headers["Range"] = range.c_str();
-		this->expectedResponseCode = 206;
+		this->expectedResponseCode = {206};
 	}
 	if (size && m_buffer) {
 		m_buffer_view = std::string_view(m_buffer, size);

@@ -106,7 +106,7 @@ fi
 
 # Create the host certificate request
 openssl genrsa -out "$XROOTD_CONFIGDIR/tls.key" 4096 >> "$BINARY_DIR/tests/$TEST_NAME/server.log"
-openssl req -new -key "$XROOTD_CONFIGDIR/tls.key" -config "$XROOTD_CONFIGDIR/tlsca.ini" -out "$XROOTD_CONFIGDIR/tls.csr" -outform PEM -subj "/CN=$(hostname)" 0<&- >> "$BINARY_DIR/tests/$TEST_NAME/server.log"
+openssl req -new -key "$XROOTD_CONFIGDIR/tls.key" -config "$XROOTD_CONFIGDIR/tlsca.ini" -out "$XROOTD_CONFIGDIR/tls.csr" -outform PEM -subj "/CN=localhost" 0<&- >> "$BINARY_DIR/tests/$TEST_NAME/server.log"
 if [ "$?" -ne 0 ]; then
   echo "Failed to generate host certificate request"
   exit 1
@@ -161,15 +161,17 @@ EOF
 
 cat > $XROOTD_CONFIGDIR/authdb <<EOF
 
-u * / lr
+u * / all
 
 EOF
 
 # Export some data through the origin
 echo "Hello, World" > "$XROOTD_EXPORTDIR/hello_world.txt"
+mkdir "$XROOTD_EXPORTDIR/testdir"
+echo "Hello, World" > "$XROOTD_EXPORTDIR/testdir/hello_world.txt"
 
 # Launch XRootD daemon.
-"$XROOTD_BIN" -c "$XROOTD_CONFIG" -l "$BINARY_DIR/tests/$TEST_NAME/server.log" 0<&- >>"$BINARY_DIR/tests/$TEST_NAME/server.log" 2>>"$BINARY_DIR/tests/$TEST_NAME/server.log" &
+ASAN_OPTIONS=detect_odr_violation=0 "$XROOTD_BIN" -c "$XROOTD_CONFIG" -l "$BINARY_DIR/tests/$TEST_NAME/server.log" 0<&- >>"$BINARY_DIR/tests/$TEST_NAME/server.log" 2>>"$BINARY_DIR/tests/$TEST_NAME/server.log" &
 XROOTD_PID=$!
 echo "xrootd daemon PID: $XROOTD_PID"
 
@@ -189,19 +191,26 @@ while [ -z "$XROOTD_URL" ]; do
   if [ $IDX -gt 1 ]; then
     echo "Waiting for xrootd to start ($IDX seconds so far) ..."
   fi
-  if [ $IDX -eq 10 ]; then
+  if [ $IDX -eq 60 ]; then
     echo "xrootd failed to start - failing"
     exit 1
   fi
 done
-XROOTD_URL="https://$(hostname):$XROOTD_URL/"
+XROOTD_URL="https://localhost:$XROOTD_URL/"
 echo "xrootd started at $XROOTD_URL"
 
 XROOTD_HTTPSERVER_CONFIG="$XROOTD_CONFIGDIR/xrootd-httpserver.cfg"
 cat > "$XROOTD_HTTPSERVER_CONFIG" <<EOF
+all.trace    all
+http.trace   all
+xrd.trace    all
+xrootd.trace all
+scitokens.trace all
 
+httpserver.trace all
 httpserver.url_base $XROOTD_URL
 httpserver.storage_prefix /
+httpserver.remote_flavor http
 
 EOF
 

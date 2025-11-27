@@ -1,6 +1,6 @@
 /***************************************************************
  *
- * Copyright (C) 2024, Pelican Project, Morgridge Institute for Research
+ * Copyright (C) 2025, Pelican Project, Morgridge Institute for Research
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you
  * may not use this file except in compliance with the License.  You may
@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include <curl/curl.h>
@@ -94,6 +95,22 @@ class HTTPRequest {
 	static std::chrono::steady_clock::duration GetStallTimeout() {
 		return m_timeout_duration;
 	}
+
+	// Handle HTTP request errors and convert them to appropriate POSIX error
+	// codes. This function can be used anywhere HTTP requests are made to
+	// provide consistent error handling.
+	//
+	// - request: The HTTPRequest object that was used for the request
+	// - log: The logger instance for error reporting
+	// - operation: A string describing the operation being performed (for
+	// logging)
+	// - context: Additional context information (for logging)
+	//
+	// Returns: A POSIX error code (-ENOENT, -EIO, -EPERM, etc.) or 0 if no
+	// error
+	static int HandleHTTPError(const HTTPRequest &request, XrdSysError &log,
+							   const char *operation,
+							   const char *context = nullptr);
 
   protected:
 	// Send the request to the HTTP server.
@@ -183,7 +200,7 @@ class HTTPRequest {
 	// the results are populated in the m_result_buffer instead.
 	std::string m_result;
 	unsigned long responseCode{0};
-	unsigned long expectedResponseCode = 200;
+	std::unordered_set<unsigned long> expectedResponseCode{200};
 	bool includeResponseHeader{false};
 
 	std::string httpVerb{"POST"};
@@ -195,17 +212,16 @@ class HTTPRequest {
 	XrdSysError &m_log;
 
   private:
-	enum class CurlResult { Ok, Fail, Retry };
-
 	virtual bool SetupHandle(
 		CURL *curl); // Configure the curl handle to be used by a given request.
 
 	virtual bool
 	ContinueHandle(); // Continue the request processing after a pause.
 
-	CurlResult ProcessCurlResult(
+	void ProcessCurlResult(
 		CURL *curl,
 		CURLcode rv); // Process a curl command that ran to completion.
+
 	bool
 	Fail(const std::string &ecode,
 		 const std::string &emsg); // Record a failure occurring for the request
@@ -269,13 +285,12 @@ class HTTPRequest {
 	std::chrono::steady_clock::time_point m_last_movement;
 	// Transfer stall timeout
 	static constexpr std::chrono::steady_clock::duration m_transfer_stall{
-		std::chrono::seconds(10)};
+		std::chrono::seconds(9)};
 
 	// The contents of a successful GET request.
 	std::string_view m_result_buffer;
 	CURL *m_curl_handle{nullptr}; // The curl handle for the ongoing request
 	char m_errorBuffer[CURL_ERROR_SIZE]; // Static error buffer for libcurl
-	unsigned m_retry_count{0};
 
 	// Time when the last request was sent on this object; used to determine
 	// whether the operation has timed out.
@@ -287,7 +302,7 @@ class HTTPRequest {
 	static std::chrono::steady_clock::duration m_timeout_duration;
 };
 
-class HTTPUpload : public HTTPRequest {
+class HTTPUpload final : public HTTPRequest {
   public:
 	HTTPUpload(const std::string &h, const std::string &o, XrdSysError &log,
 			   const TokenFile *token)
@@ -297,15 +312,30 @@ class HTTPUpload : public HTTPRequest {
 
 	virtual ~HTTPUpload();
 
-	virtual bool SendRequest(const std::string &payload, off_t offset,
-							 size_t size);
+	virtual bool SendRequest(const std::string &payload);
+
+	// Start a streaming request.
+	//
+	// - payload: The payload contents when uploading.
+	// - object_size: Size of the entire upload payload.
+	bool StartStreamingRequest(const std::string_view payload,
+							   off_t object_size);
+
+	// Continue a streaming request.
+	//
+	// - payload: The payload contents when uploading.
+	// - object_size: Size of the entire upload payload.
+	// - final: True if this is the last or only payload for the request.  False
+	// otherwise.
+	bool ContinueStreamingRequest(const std::string_view payload,
+								  off_t object_size, bool final);
 
   protected:
 	std::string object;
 	std::string path;
 };
 
-class HTTPDownload : public HTTPRequest {
+class HTTPDownload final : public HTTPRequest {
   public:
 	HTTPDownload(const std::string &h, const std::string &o, XrdSysError &log,
 				 const TokenFile *token)
@@ -321,7 +351,23 @@ class HTTPDownload : public HTTPRequest {
 	std::string object;
 };
 
-class HTTPHead : public HTTPRequest {
+class HTTPList final : public HTTPRequest {
+  public:
+	HTTPList(const std::string &h, const std::string &o, XrdSysError &log,
+			 const TokenFile *token)
+		: HTTPRequest(h, log, token), object(o) {
+		hostUrl = hostUrl + "/" + object;
+	}
+
+	virtual ~HTTPList();
+
+	virtual bool SendRequest();
+
+  protected:
+	std::string object;
+};
+
+class HTTPHead final : public HTTPRequest {
   public:
 	HTTPHead(const std::string &h, const std::string &o, XrdSysError &log,
 			 const TokenFile *token)
@@ -330,6 +376,22 @@ class HTTPHead : public HTTPRequest {
 	}
 
 	virtual ~HTTPHead();
+
+	virtual bool SendRequest();
+
+  protected:
+	std::string object;
+};
+
+class HTTPDelete final : public HTTPRequest {
+  public:
+	HTTPDelete(const std::string &h, const std::string &o, XrdSysError &log,
+			   const TokenFile *token)
+		: HTTPRequest(h, log, token), object(o) {
+		hostUrl = hostUrl + "/" + object;
+	}
+
+	virtual ~HTTPDelete();
 
 	virtual bool SendRequest();
 

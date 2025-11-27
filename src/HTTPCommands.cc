@@ -1,6 +1,6 @@
 /***************************************************************
  *
- * Copyright (C) 2024, Pelican Project, Morgridge Institute for Research
+ * Copyright (C) 2025, Pelican Project, Morgridge Institute for Research
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you
  * may not use this file except in compliance with the License.  You may
@@ -81,7 +81,7 @@ size_t HTTPRequest::handleResults(const void *ptr, size_t size, size_t nmemb,
 				return 0;
 			}
 		}
-		if (me->getResponseCode() == me->expectedResponseCode &&
+		if (me->expectedResponseCode.count(me->getResponseCode()) &&
 			me->requestResult() != nullptr) {
 			if (!me->m_result_buffer_initialized) {
 				me->m_result_buffer_initialized = true;
@@ -141,6 +141,9 @@ bool HTTPRequest::SendHTTPRequest(const std::string &payload) {
 	}
 
 	headers["Content-Type"] = "binary/octet-stream";
+
+	m_log.Log(LogMask::Debug, "HTTPRequest::SendHTTPRequest",
+			  "Sending request");
 
 	return sendPreparedRequest(hostUrl, payload, payload.size(), true);
 }
@@ -277,6 +280,15 @@ size_t HTTPRequest::ReadCallback(char *buffer, size_t size, size_t n, void *v) {
 		return CURL_READFUNC_ABORT;
 	}
 
+	if (payload->m_parent.m_log.getMsgMask() & LogMask::Dump) {
+		payload->m_parent.m_log.Log(
+			LogMask::Dump, "ReadCallback",
+			("sentSoFar=" + std::to_string(payload->sentSoFar) +
+			 " data.size=" + std::to_string(payload->data.size()) +
+			 " final=" + std::to_string(payload->final))
+				.c_str());
+	}
+
 	if (payload->sentSoFar == static_cast<off_t>(payload->data.size())) {
 		payload->sentSoFar = 0;
 		if (payload->final) {
@@ -302,11 +314,18 @@ size_t HTTPRequest::ReadCallback(char *buffer, size_t size, size_t n, void *v) {
 	return request;
 }
 
-int HTTPRequest::XferInfoCallback(void *clientp, curl_off_t dltotal,
-								  curl_off_t /*dlnow*/, curl_off_t ultotal,
-								  curl_off_t /*ulnow*/) {
+// Periodic callback from libcurl reporting overall transfer progress.
+// This is used to detect transfer stalls, where no data has been sent for
+// at least `m_transfer_stall` duration (defaults to 10s).
+//
+// Note:
+// - dltotal/ultotal are the total number of bytes to be downloaded/uploaded.
+// - dlnow/ulnow are the number of bytes downloaded/uploaded so far.
+int HTTPRequest::XferInfoCallback(void *clientp, curl_off_t /*dltotal*/,
+								  curl_off_t dlnow, curl_off_t /*ultotal*/,
+								  curl_off_t ulnow) {
 	auto me = reinterpret_cast<HTTPRequest *>(clientp);
-	if ((me->m_bytes_recv != dltotal) || (me->m_bytes_sent != ultotal)) {
+	if ((me->m_bytes_recv != dlnow) || (me->m_bytes_sent != ulnow)) {
 		me->m_last_movement = std::chrono::steady_clock::now();
 	} else if (std::chrono::steady_clock::now() - me->m_last_movement >
 			   m_transfer_stall) {
@@ -314,8 +333,8 @@ int HTTPRequest::XferInfoCallback(void *clientp, curl_off_t dltotal,
 		me->errorMessage = "I/O stall during transfer";
 		return 1;
 	}
-	me->m_bytes_recv = dltotal;
-	me->m_bytes_sent = ultotal;
+	me->m_bytes_recv = dlnow;
+	me->m_bytes_sent = ulnow;
 	return 0;
 }
 bool HTTPRequest::sendPreparedRequestNonblocking(const std::string &uri,
@@ -355,6 +374,7 @@ bool HTTPRequest::sendPreparedRequestNonblocking(const std::string &uri,
 	if (m_unpause_queue) {
 		m_unpause_queue->Produce(this);
 	} else {
+		m_last_movement = std::chrono::steady_clock::now();
 		m_queue->Produce(this);
 	}
 	return true;
@@ -373,6 +393,7 @@ bool HTTPRequest::sendPreparedRequest(const std::string &uri,
 }
 
 void HTTPRequest::Tick(std::chrono::steady_clock::time_point now) {
+	m_log.Log(LogMask::Debug, "HTTPRequest::Tick", "Tick called");
 	if (!m_is_streaming) {
 		return;
 	}
@@ -530,7 +551,17 @@ bool HTTPRequest::SetupHandle(CURL *curl) {
 		}
 	}
 
-	rv = curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1);
+	if (httpVerb == "DELETE") {
+		rv = curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+		if (rv != CURLE_OK) {
+			this->errorCode = "E_CURL_LIB";
+			this->errorMessage =
+				"curl_easy_setopt( CURLOPT_CUSTOMREQUEST ) failed.";
+			return false;
+		}
+	}
+
+	rv = curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0);
 	if (rv != CURLE_OK) {
 		this->errorCode = "E_CURL_LIB";
 		this->errorMessage = "curl_easy_setopt( CURLOPT_NOPROGRESS ) failed.";
@@ -667,7 +698,11 @@ bool HTTPRequest::SetupHandle(CURL *curl) {
 			return false;
 		}
 	}
+	m_log.Log(LogMask::Debug, "SetupHandle",
+			  "Checking if curl verbose logging is enabled");
 	if (m_log.getMsgMask() & LogMask::Dump) {
+		m_log.Log(LogMask::Dump, "SetupHandle",
+				  "Enabling curl verbose logging for URL:", m_uri.c_str());
 		rv =
 			curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debugAndDumpCallback);
 		if (rv != CURLE_OK) {
@@ -709,8 +744,7 @@ void HTTPRequest::Notify() {
 	m_cv.notify_one();
 }
 
-HTTPRequest::CurlResult HTTPRequest::ProcessCurlResult(CURL *curl,
-													   CURLcode rv) {
+void HTTPRequest::ProcessCurlResult(CURL *curl, CURLcode rv) {
 
 	if (rv != 0) {
 		if (errorCode.empty()) {
@@ -721,7 +755,7 @@ HTTPRequest::CurlResult HTTPRequest::ProcessCurlResult(CURL *curl,
 			errorMessage = error.str();
 		}
 
-		return CurlResult::Fail;
+		return;
 	}
 
 	responseCode = 0;
@@ -735,53 +769,74 @@ HTTPRequest::CurlResult HTTPRequest::ProcessCurlResult(CURL *curl,
 		errorCode = "E_CURL_LIB";
 		errorMessage = "curl_easy_getinfo() failed.";
 
-		return CurlResult::Fail;
+		return;
 	}
 
+	// 503 is "Service Unavailable"; S3 uses this for throttling
 	if (responseCode == 503 &&
 		(m_result.find("<Error><Code>RequestLimitExceeded</Code>") !=
-		 std::string::npos) &&
-		m_retry_count == 0) {
+		 std::string::npos)) {
 		m_result.clear();
-		m_retry_count++;
-		return CurlResult::Retry;
+		errorCode = "E_HTTP_REQUEST_LIMIT_EXCEEDED";
+		errorMessage = "Request limit exceeded.";
+		m_log.Log(LogMask::Warning, "HTTPRequest::ProcessCurlResult",
+				  "Request limit exceeded for ", m_uri.c_str());
+		return;
 	}
 
-	if (responseCode != expectedResponseCode) {
-		formatstr(errorCode,
-				  "E_HTTP_RESPONSE_NOT_EXPECTED (response %lu != expected %lu)",
-				  responseCode, expectedResponseCode);
+	if (!expectedResponseCode.count(responseCode)) {
+		errorCode = "E_HTTP_RESPONSE_NOT_EXPECTED";
 		errorMessage = m_result;
 		if (errorMessage.empty()) {
-			formatstr(
-				errorMessage,
-				"HTTP response was %lu, not %lu, and no body was returned.",
-				responseCode, expectedResponseCode);
+			std::ostringstream ss;
+			ss << "HTTP response was " << responseCode << ", expected one of {";
+			bool first = true;
+			for (const auto &code : expectedResponseCode) {
+				if (!first) {
+					ss << ", ";
+				}
+				first = false;
+				ss << code;
+			}
+			ss << "}, and no body was returned.";
+			errorMessage = ss.str();
 		}
-		return CurlResult::Fail;
+		return;
 	}
 
-	return CurlResult::Ok;
+	return;
 }
 
 // ---------------------------------------------------------------------------
 
 HTTPUpload::~HTTPUpload() {}
 
-bool HTTPUpload::SendRequest(const std::string &payload, off_t offset,
-							 size_t size) {
-	if (offset != 0 || size != 0) {
-		std::string range;
-		formatstr(range, "bytes=%lld-%lld", static_cast<long long int>(offset),
-				  static_cast<long long int>(offset + size - 1));
-		headers["Range"] = range.c_str();
-	}
-
+bool HTTPUpload::SendRequest(const std::string &payload) {
 	httpVerb = "PUT";
+	expectedResponseCode = {200, 201};
 	return SendHTTPRequest(payload);
 }
 
+bool HTTPUpload::StartStreamingRequest(const std::string_view payload,
+									   off_t object_size) {
+	httpVerb = "PUT";
+	expectedResponseCode = {200, 201};
+	headers["Content-Type"] = "binary/octet-stream";
+	return sendPreparedRequest(hostUrl, payload, object_size, false);
+}
+
+bool HTTPUpload::ContinueStreamingRequest(const std::string_view payload,
+										  off_t object_size, bool final) {
+	// Note that despite the fact that final gets passed through here,
+	// in reality the way that curl determines whether the data transfer is
+	// done is by seeing if the total amount of data sent is equal to the
+	// expected size of the entire payload, stored in m_object_size.
+	// See HTTPRequest::ReadCallback for more info
+	return sendPreparedRequest(hostUrl, payload, object_size, final);
+}
+
 void HTTPRequest::Init(XrdSysError &log) {
+	log.Log(LogMask::Debug, "HTTPRequest::Init", "called");
 	if (!m_workers_initialized) {
 		for (unsigned idx = 0; idx < CurlWorker::GetPollThreads(); idx++) {
 			m_workers.push_back(new CurlWorker(m_queue, log));
@@ -807,8 +862,21 @@ bool HTTPDownload::SendRequest(off_t offset, size_t size) {
 		formatstr(range, "bytes=%lld-%lld", static_cast<long long int>(offset),
 				  static_cast<long long int>(offset + size - 1));
 		headers["Range"] = range.c_str();
-		this->expectedResponseCode = 206;
+		this->expectedResponseCode = {206};
 	}
+	m_log.Log(LogMask::Debug, "HTTPDownload::SendRequest",
+			  "Sending GET request");
+	httpVerb = "GET";
+	std::string noPayloadAllowed;
+	return SendHTTPRequest(noPayloadAllowed);
+}
+
+// ---------------------------------------------------------------------------
+
+HTTPList::~HTTPList() {}
+
+bool HTTPList::SendRequest() {
+	expectedResponseCode = {200};
 
 	httpVerb = "GET";
 	std::string noPayloadAllowed;
@@ -827,3 +895,58 @@ bool HTTPHead::SendRequest() {
 }
 
 // ---------------------------------------------------------------------------
+
+HTTPDelete::~HTTPDelete() {}
+
+bool HTTPDelete::SendRequest() {
+	httpVerb = "DELETE";
+	this->expectedResponseCode = {204};
+	includeResponseHeader = true;
+	std::string noPayloadAllowed;
+	return SendHTTPRequest(noPayloadAllowed);
+}
+
+// ---------------------------------------------------------------------------
+
+int HTTPRequest::HandleHTTPError(const HTTPRequest &request, XrdSysError &log,
+								 const char *operation, const char *context) {
+	auto httpCode = request.getResponseCode();
+	if (httpCode) {
+		std::stringstream ss;
+		ss << operation << " failed: " << request.getResponseCode() << ": "
+		   << request.getResultString();
+		if (context) {
+			ss << " (context: " << context << ")";
+		}
+		log.Log(LogMask::Warning, "HTTPRequest::HandleHTTPError",
+				ss.str().c_str());
+
+		switch (httpCode) {
+		case 404:
+			return -ENOENT;
+		case 500:
+			return -EIO;
+		case 403:
+			return -EPERM;
+		case 401:
+			return -EACCES;
+		case 400:
+			return -EINVAL;
+		case 503:
+			return -EAGAIN;
+		default:
+			return -EIO;
+		}
+	} else {
+		std::stringstream ss;
+		ss << "Failed to send " << operation
+		   << " command: " << request.getErrorCode() << ": "
+		   << request.getErrorMessage();
+		if (context) {
+			ss << " (context: " << context << ")";
+		}
+		log.Log(LogMask::Warning, "HTTPRequest::HandleHTTPError",
+				ss.str().c_str());
+		return -EIO;
+	}
+}

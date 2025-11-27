@@ -26,13 +26,11 @@ fi
 
 echo "Setting up S3 server for $TEST_NAME test"
 
-MINIO_BIN="$(command -v minio)"
 if [ -z "$MINIO_BIN" ]; then
   echo "minio binary not found; cannot run unit test"
   exit 1
 fi
 
-MC_BIN="$(command -v mc)"
 if [ -z "$MC_BIN" ]; then
   echo "mc binary not found; cannot run unit test"
   exit 1
@@ -167,7 +165,7 @@ while [ -z "$MINIO_URL" ]; do
   if [ $IDX -gt 1 ]; then
     echo "Waiting for minio to start ($IDX seconds so far) ..."
   fi
-  if [ $IDX -eq 10 ]; then
+  if [ $IDX -eq 60 ]; then
     echo "minio failed to start - failing"
     exit 1
   fi
@@ -200,6 +198,7 @@ fi
 
 echo "Hello, World" > "$RUNDIR/hello_world.txt"
 "$MC_BIN" --insecure --config-dir "$MINIO_CLIENTDIR" cp "$RUNDIR/hello_world.txt" userminio/test-bucket/hello_world.txt
+"$MC_BIN" --insecure --config-dir "$MINIO_CLIENTDIR" cp "$RUNDIR/hello_world.txt" userminio/test-bucket/hello_world2.txt
 
 IDX=0
 COUNT=25
@@ -250,11 +249,29 @@ xrd.tls $MINIO_CERTSDIR/public.crt $MINIO_CERTSDIR/private.key
 
 oss.local_root /
 ofs.osslib $BINARY_DIR/libXrdS3.so
+ofs.osslib ++ $BINARY_DIR/libXrdOssFilter.so
 
 s3.trace debug
 
 s3.begin
 s3.path_name /test
+s3.bucket_name $BUCKET_NAME
+s3.service_url $MINIO_URL
+s3.service_name $(hostname)
+s3.url_style path
+s3.region us-east-1
+s3.access_key_file $XROOTD_CONFIGDIR/access_key
+s3.secret_key_file $XROOTD_CONFIGDIR/secret_key
+s3.end
+
+#
+# Integration test for the filter module.  Export the
+# same bucket again as /test2 but filter out some contents
+#
+filter.prefix /test
+filter.glob /test2/hello_world.*
+s3.begin
+s3.path_name /test2
 s3.bucket_name $BUCKET_NAME
 s3.service_url $MINIO_URL
 s3.service_name $(hostname)
@@ -277,7 +294,7 @@ export X509_CERT_FILE=$MINIO_CERTSDIR/CAs/tlsca.pem
 if [ "$VALGRIND" -eq 1 ]; then
   valgrind --leak-check=full --track-origins=yes "$XROOTD_BIN" -c "$XROOTD_CONFIG" -l "$BINARY_DIR/tests/$TEST_NAME/server.log" 0<&- 2>>"$BINARY_DIR/tests/$TEST_NAME/server.log" >>"$BINARY_DIR/tests/$TEST_NAME/server.log" &
 else
-  "$XROOTD_BIN" -c "$XROOTD_CONFIG" -l "$BINARY_DIR/tests/$TEST_NAME/server.log" 0<&- 2>>"$BINARY_DIR/tests/$TEST_NAME/server.log" >>"$BINARY_DIR/tests/$TEST_NAME/server.log" &
+  ASAN_OPTIONS=detect_odr_violation=0 LSAN_OPTIONS=suppressions=${SOURCE_DIR}/lsan-suppressions.txt "$XROOTD_BIN" -c "$XROOTD_CONFIG" -l "$BINARY_DIR/tests/$TEST_NAME/server.log" 0<&- 2>>"$BINARY_DIR/tests/$TEST_NAME/server.log" >>"$BINARY_DIR/tests/$TEST_NAME/server.log" &
 fi
 XROOTD_PID=$!
 echo "xrootd daemon PID: $XROOTD_PID"
@@ -290,6 +307,8 @@ while [ -z "$XROOTD_URL" ]; do
   IDX=$(($IDX+1))
   if ! kill -0 "$XROOTD_PID" 2>/dev/null; then
     echo "xrootd process (PID $XROOTD_PID) failed to start" >&2
+    echo "Echoing server logs" >&2
+    cat "$BINARY_DIR/tests/$TEST_NAME/server.log" >&2
     exit 1
   fi
   if [ $IDX -gt 1 ]; then
